@@ -21,6 +21,7 @@ package org.kiji.testing.fakehtable
 
 import java.io.PrintStream
 import java.util.Arrays
+import java.util.{ArrayList => JArrayList}
 import java.util.{Iterator => JIterator}
 import java.util.{List => JList}
 import java.util.{Map => JMap}
@@ -28,7 +29,6 @@ import java.util.NavigableMap
 import java.util.NavigableSet
 import java.util.{TreeMap => JTreeMap}
 import java.util.{TreeSet => JTreeSet}
-
 import scala.Option.option2Iterable
 import scala.collection.JavaConverters.asScalaBufferConverter
 import scala.collection.JavaConverters.asScalaSetConverter
@@ -36,7 +36,6 @@ import scala.collection.JavaConverters.mapAsScalaMapConverter
 import scala.collection.mutable.Buffer
 import scala.util.control.Breaks.break
 import scala.util.control.Breaks.breakable
-
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.hbase.HConstants
 import org.apache.hadoop.hbase.HTableDescriptor
@@ -52,11 +51,18 @@ import org.apache.hadoop.hbase.client.Row
 import org.apache.hadoop.hbase.client.RowLock
 import org.apache.hadoop.hbase.client.Scan
 import org.apache.hadoop.hbase.client.coprocessor.Batch
+import org.apache.hadoop.hbase.filter.Filter
 import org.apache.hadoop.hbase.io.TimeRange
 import org.apache.hadoop.hbase.ipc.CoprocessorProtocol
 import org.apache.hadoop.hbase.util.Bytes
 import org.kiji.testing.fakehtable.JNavigableMapWithAsScalaIterator.javaNavigableMapAsScalaIterator
 import org.slf4j.LoggerFactory
+import org.apache.hadoop.hbase.filter.Filter.ReturnCode
+import java.io.DataOutput
+import java.io.DataInput
+import com.google.common.io.ByteStreams.ByteArrayDataOutputStream
+import com.google.common.io.ByteStreams
+import org.apache.hadoop.io.WritableUtils
 
 /**
  * Fake in-memory HTable.
@@ -147,19 +153,32 @@ class FakeHTable(
   }
 
   override def get(get: Get): Result = {
+    // Get should be built around a scan:
+    val filter: Filter = getFilter(get.getFilter)
+    filter.reset()
+    if (filter.filterAllRemaining()) {
+      return new Result()
+    }
     val rowKey = get.getRow
+    if (filter.filterRowKey(rowKey, 0, rowKey.size)) {
+      return new Result()
+    }
     val row = rows.get(rowKey)
     if (row == null) {
-      return new Result()  // empty result
-    } else {
-      return makeResult(
-          rowKey = rowKey,
-          row = row,
-          familyMap = get.getFamilyMap,
-          timeRange = get.getTimeRange,
-          maxVersions = get.getMaxVersions
-      )
+      return new Result()
     }
+    val result = makeResult(
+        rowKey = rowKey,
+        row = row,
+        familyMap = get.getFamilyMap,
+        timeRange = get.getTimeRange,
+        maxVersions = get.getMaxVersions,
+        filter = filter
+    )
+    if (filter.filterRow()) {
+      return new Result()
+    }
+    return result
   }
 
   override def get(gets: JList[Get]): Array[Result] = {
@@ -520,6 +539,7 @@ class FakeHTable(
    * @param familyMap the requested columns.
    * @param timeRange the timestamp range.
    * @param maxVersions maximum number of versions to return.
+   * @param filter optional HBase filter to apply on the KeyValue entries.
    * @return a new Result instance with the specified cells (KeyValue entries).
    */
   private def makeResult(
@@ -527,9 +547,10 @@ class FakeHTable(
       row: RowFamilies,
       familyMap: JMap[Bytes, NavigableSet[Bytes]],
       timeRange: TimeRange,
-      maxVersions: Int
+      maxVersions: Int,
+      filter: Filter = PassThroughFilter
   ): Result = {
-    val kvs = Buffer[KeyValue]()
+    val kvs: JList[KeyValue] = new JArrayList[KeyValue]()
     val requestedFamilies = if (!familyMap.isEmpty) familyMap.keySet else row.keySet
     for (requestedFamily <- requestedFamilies.asScala) {
       /** Map: qualifier -> time stamp -> cell value */
@@ -545,11 +566,13 @@ class FakeHTable(
           if (rowColumnSeries != null) {
             /** Map: time stamp -> cell value */
             val versionMap = rowColumnSeries.subMap(timeRange.getMax, false, timeRange.getMin, true)
+            var nversions = 0
             breakable {
               for ((timestamp, value) <- versionMap.asScalaIterator) {
                 val kv = new KeyValue(rowKey, requestedFamily, requestedQualifier, timestamp, value)
-                kvs += kv
-                if (kvs.size >= maxVersions) {
+                kvs.add(filter.transform(kv))
+                nversions += 1
+                if (nversions >= maxVersions) {
                   break
                 }
               }
@@ -558,7 +581,10 @@ class FakeHTable(
         }
       }
     }
-    return new Result(kvs.toArray)
+    if (filter.hasFilterRow()) {
+      filter.filterRow(kvs)
+    }
+    return new Result(kvs.toArray(new Array[KeyValue](kvs.size)))
   }
 
   // -----------------------------------------------------------------------------------------------
@@ -595,6 +621,19 @@ class FakeHTable(
     }
   }
 
+  /**
+   * Instantiates the specified HBase filter.
+   *
+   * @param filterSpec HBase filter specification, or null for no filter.
+   * @return a new instance of the specified filter.
+   */
+  private def getFilter(filterSpec: Filter): Filter = {
+    Option(filterSpec) match {
+      case Some(hfilter) => WritableUtils.clone(hfilter, conf)
+      case None => PassThroughFilter
+    }
+  }
+
   // -----------------------------------------------------------------------------------------------
 
   /**
@@ -620,6 +659,9 @@ class FakeHTable(
        && (Bytes.BYTES_COMPARATOR.compare(key, scan.getStopRow) >= 0)) {
       key = null
     }
+
+    /** HBase row/column filter. */
+    val filter = getFilter(scan.getFilter)
 
     /** Next result to return. */
     private var nextResult: Result = getNextResult()
@@ -650,30 +692,48 @@ class FakeHTable(
       sys.error("dead code")
     }
 
-    /** @return a Result, potentially empty, for the next row. */
-    private def getResultForNextRow(): Option[Result] = {
-      if (key == null) { return None }
+    /** @return the next row key, or null if there is no more row. */
+    private def nextRowKey(): Bytes = {
+      if (key == null) { return null }
       val rowKey = key
-
-      /** Map: family -> qualifier -> time stamp -> cell value */
-      val row = rows.get(key)
-      require(row != null)
-
-      // Advance to next key
-      key = rows.higherKey(key)
+      key = rows.higherKey(rowKey)
       if ((key != null)
           && !scan.getStopRow.isEmpty
           && (Bytes.BYTES_COMPARATOR.compare(key, scan.getStopRow) >= 0)) {
         key = null
       }
+      return rowKey
+    }
 
-      return Some(makeResult(
+    /** @return a Result, potentially empty, for the next row. */
+    private def getResultForNextRow(): Option[Result] = {
+      filter.reset()
+      if (filter.filterAllRemaining) { return None }
+
+      val rowKey = nextRowKey()
+      if (rowKey == null) { return None }
+      if (filter.filterRowKey(rowKey, 0, rowKey.size)) {
+        // Row is filtered out based on its key, return an empty Result:
+        return Some(new Result())
+      }
+
+      /** Map: family -> qualifier -> time stamp -> cell value */
+      val row = rows.get(rowKey)
+      require(row != null)
+
+      val result = makeResult(
           rowKey = rowKey,
           row = row,
           familyMap = scan.getFamilyMap,
           timeRange = scan.getTimeRange,
-          maxVersions = scan.getMaxVersions
-      ))
+          maxVersions = scan.getMaxVersions,
+          filter = filter
+      )
+      if (filter.filterRow()) {
+        // Filter finally decided to exclude the row, return an empty Result:
+        return Some(new Result())
+      }
+      return Some(result)
     }
 
     override def next(nrows: Int): Array[Result] = {
@@ -703,4 +763,5 @@ class FakeHTable(
   }
 
   // -----------------------------------------------------------------------------------------------
+
 }
