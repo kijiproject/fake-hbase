@@ -20,8 +20,8 @@
 package org.kiji.testing.fakehtable
 
 import java.io.PrintStream
-import java.util.Arrays
 import java.util.{ArrayList => JArrayList}
+import java.util.Arrays
 import java.util.{Iterator => JIterator}
 import java.util.{List => JList}
 import java.util.{Map => JMap}
@@ -29,13 +29,16 @@ import java.util.NavigableMap
 import java.util.NavigableSet
 import java.util.{TreeMap => JTreeMap}
 import java.util.{TreeSet => JTreeSet}
+
 import scala.Option.option2Iterable
 import scala.collection.JavaConverters.asScalaBufferConverter
 import scala.collection.JavaConverters.asScalaSetConverter
 import scala.collection.JavaConverters.mapAsScalaMapConverter
 import scala.collection.mutable.Buffer
+import scala.util.control.Breaks
 import scala.util.control.Breaks.break
 import scala.util.control.Breaks.breakable
+
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.hbase.HConstants
 import org.apache.hadoop.hbase.HTableDescriptor
@@ -55,14 +58,9 @@ import org.apache.hadoop.hbase.filter.Filter
 import org.apache.hadoop.hbase.io.TimeRange
 import org.apache.hadoop.hbase.ipc.CoprocessorProtocol
 import org.apache.hadoop.hbase.util.Bytes
+import org.apache.hadoop.io.WritableUtils
 import org.kiji.testing.fakehtable.JNavigableMapWithAsScalaIterator.javaNavigableMapAsScalaIterator
 import org.slf4j.LoggerFactory
-import org.apache.hadoop.hbase.filter.Filter.ReturnCode
-import java.io.DataOutput
-import java.io.DataInput
-import com.google.common.io.ByteStreams.ByteArrayDataOutputStream
-import com.google.common.io.ByteStreams
-import org.apache.hadoop.io.WritableUtils
 
 /**
  * Fake in-memory HTable.
@@ -153,7 +151,8 @@ class FakeHTable(
   }
 
   override def get(get: Get): Result = {
-    // Get should be built around a scan:
+    // get() could be built around scan(), to ensure consistent filters behavior.
+    // For now, we use a shorcut:
     val filter: Filter = getFilter(get.getFilter)
     filter.reset()
     if (filter.filterAllRemaining()) {
@@ -531,6 +530,9 @@ class FakeHTable(
 
   // -----------------------------------------------------------------------------------------------
 
+  private val BreakToNextColumn = new Breaks()
+  private val BreakToNextRow = new Breaks()
+
   /**
    * Builds an HTable request Result instance.
    *
@@ -552,28 +554,41 @@ class FakeHTable(
   ): Result = {
     val kvs: JList[KeyValue] = new JArrayList[KeyValue]()
     val requestedFamilies = if (!familyMap.isEmpty) familyMap.keySet else row.keySet
-    for (requestedFamily <- requestedFamilies.asScala) {
-      /** Map: qualifier -> time stamp -> cell value */
-      val rowQualifierMap = row.get(requestedFamily)
-      if (rowQualifierMap != null) {
-        val requestedQualifiers = {
-          val qset = familyMap.get(requestedFamily)
-          if ((qset != null) && !qset.isEmpty) qset else rowQualifierMap.keySet
-        }
-        for (requestedQualifier <- requestedQualifiers.asScala) {
-          /** Map: time stamp -> cell value */
-          val rowColumnSeries = rowQualifierMap.get(requestedQualifier)
-          if (rowColumnSeries != null) {
+
+    BreakToNextRow.breakable {
+      for (requestedFamily <- requestedFamilies.asScala) {
+        /** Map: qualifier -> time stamp -> cell value */
+        val rowQualifierMap = row.get(requestedFamily)
+        if (rowQualifierMap != null) {
+          val requestedQualifiers = {
+            val qset = familyMap.get(requestedFamily)
+            if ((qset != null) && !qset.isEmpty) qset else rowQualifierMap.keySet
+          }
+          for (requestedQualifier <- requestedQualifiers.asScala) {
             /** Map: time stamp -> cell value */
-            val versionMap = rowColumnSeries.subMap(timeRange.getMax, false, timeRange.getMin, true)
-            var nversions = 0
-            breakable {
-              for ((timestamp, value) <- versionMap.asScalaIterator) {
-                val kv = new KeyValue(rowKey, requestedFamily, requestedQualifier, timestamp, value)
-                kvs.add(filter.transform(kv))
-                nversions += 1
-                if (nversions >= maxVersions) {
-                  break
+            val rowColumnSeries = rowQualifierMap.get(requestedQualifier)
+            if (rowColumnSeries != null) {
+              /** Map: time stamp -> cell value */
+              val versionMap =
+                  rowColumnSeries.subMap(timeRange.getMax, false, timeRange.getMin, true)
+              BreakToNextColumn.breakable {
+                var nversions = 0
+                for ((timestamp, value) <- versionMap.asScalaIterator) {
+                  val kv =
+                      new KeyValue(rowKey, requestedFamily, requestedQualifier, timestamp, value)
+                  filter.filterKeyValue(kv) match {
+                  case Filter.ReturnCode.INCLUDE => {
+                    kvs.add(filter.transform(kv))
+                    nversions += 1
+                    if (nversions >= maxVersions) {
+                      BreakToNextColumn.break
+                    }
+                  }
+                  case Filter.ReturnCode.SKIP => // Skip this key/value pair.
+                  case Filter.ReturnCode.NEXT_COL => BreakToNextColumn.break
+                  case Filter.ReturnCode.NEXT_ROW => BreakToNextRow.break
+                  case Filter.ReturnCode.SEEK_NEXT_USING_HINT => sys.error("Not implemented")
+                  }
                 }
               }
             }

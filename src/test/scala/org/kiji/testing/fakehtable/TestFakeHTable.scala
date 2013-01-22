@@ -327,7 +327,7 @@ class TestFakeHTable extends FunSuite {
   }
 
   /**
-   * Returns the smallest row strictly greater than the specified row.
+   * Returns the smallest row key strictly greater than the specified row.
    *
    * @param row HBase row key.
    * @return the smallest row strictly greater than the specified row.
