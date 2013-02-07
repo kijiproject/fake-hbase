@@ -688,8 +688,9 @@ class FakeHTable(
     return map
   }
 
+  /** See HTable.getRegionsInRange(startKey, endKey). */
   def getRegionsInRange(startKey: Bytes, endKey: Bytes): JList[HRegionLocation] = {
-    val endKeyIsEndOfTable = Bytes.equals(endKey, HConstants.EMPTY_END_ROW);
+    val endKeyIsEndOfTable = Bytes.equals(endKey, HConstants.EMPTY_END_ROW)
     if ((Bytes.compareTo(startKey, endKey) > 0) && !endKeyIsEndOfTable) {
       throw new IllegalArgumentException(
         "Invalid range: " + Bytes.toStringBinary(startKey) +
