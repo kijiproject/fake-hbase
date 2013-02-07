@@ -688,7 +688,9 @@ class FakeHTable(
     return map
   }
 
-  /** See HTable.getRegionsInRange(startKey, endKey). */
+  /** See HTable.getRegionsInRange(startKey, endKey).
+    * Adapted from org.apache.hadoop.hbase.client.HTable.
+    */
   def getRegionsInRange(startKey: Bytes, endKey: Bytes): JList[HRegionLocation] = {
     val endKeyIsEndOfTable = Bytes.equals(endKey, HConstants.EMPTY_END_ROW)
     if ((Bytes.compareTo(startKey, endKey) > 0) && !endKeyIsEndOfTable) {
