@@ -688,6 +688,24 @@ class FakeHTable(
     return map
   }
 
+  def getRegionsInRange(startKey: Bytes, endKey: Bytes): JList[HRegionLocation] = {
+    val endKeyIsEndOfTable = Bytes.equals(endKey, HConstants.EMPTY_END_ROW);
+    if ((Bytes.compareTo(startKey, endKey) > 0) && !endKeyIsEndOfTable) {
+      throw new IllegalArgumentException(
+        "Invalid range: " + Bytes.toStringBinary(startKey) +
+        " > " + Bytes.toStringBinary(endKey))
+    }
+    val regionList = new JArrayList[HRegionLocation]();
+    var currentKey = startKey;
+    do {
+      val regionLocation = getRegionLocation(currentKey, false);
+      regionList.add(regionLocation);
+      currentKey = regionLocation.getRegionInfo().getEndKey();
+    } while (!Bytes.equals(currentKey, HConstants.EMPTY_END_ROW) &&
+             (endKeyIsEndOfTable || Bytes.compareTo(currentKey, endKey) < 0));
+    return regionList;
+  }
+
   // -----------------------------------------------------------------------------------------------
 
   def toHex(bytes: Bytes): String = {
