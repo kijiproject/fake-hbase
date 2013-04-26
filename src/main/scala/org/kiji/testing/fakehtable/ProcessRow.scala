@@ -154,6 +154,11 @@ object ProcessRow {
                 TimestampLoop.break
               }
             }
+            case Filter.ReturnCode.INCLUDE_AND_NEXT_COL => {
+              kvs.add(filter.transform(kv))
+              nversions += 1
+              TimestampLoop.break
+            }
             case Filter.ReturnCode.SKIP => // Skip this key/value pair.
             case Filter.ReturnCode.NEXT_COL => TimestampLoop.break
             case Filter.ReturnCode.NEXT_ROW => FamilyLoop.break
