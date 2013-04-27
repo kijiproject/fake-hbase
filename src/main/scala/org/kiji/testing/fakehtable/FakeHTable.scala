@@ -145,13 +145,13 @@ class FakeHTable(
     return !this.get(get).isEmpty()
   }
 
-  override def batch(actions: JList[Row], results: Array[Object]): Unit = {
+  override def batch(actions: java.util.List[_ <: org.apache.hadoop.hbase.client.Row], results: Array[Object]): Unit = {
     require(results.size == actions.size)
     val array = batch(actions)
     System.arraycopy(array, 0, results, 0, results.length)
   }
 
-  override def batch(actions: JList[Row]): Array[Object] = {
+  override def batch(actions: java.util.List[_ <: org.apache.hadoop.hbase.client.Row]): Array[Object] = {
     val results = Buffer[Object]()
     actions.asScala.foreach { action =>
       action match {
@@ -881,6 +881,8 @@ class FakeHTable(
     }
   }
 
+def append(x$1: org.apache.hadoop.hbase.client.Append): org.apache.hadoop.hbase.client.Result = ???
+def mutateRow(x$1: org.apache.hadoop.hbase.client.RowMutations): Unit = ???
   // -----------------------------------------------------------------------------------------------
 
 }
