@@ -661,6 +661,21 @@ class FakeHTable(
   // -----------------------------------------------------------------------------------------------
   // HTable methods that are not part of HTableInterface, but required anyway:
 
+
+  def getStartEndKeys(): org.apache.hadoop.hbase.util.Pair[Array[Array[Byte]], Array[Array[Byte]]] = {
+    val list: JList[HRegionInfo] = getRegions
+    val startKey = Array.ofDim[Byte](list.size(), 0)
+    val endKey = Array.ofDim[Byte](list.size(), 0)
+
+    for( i <- 0 until list.size()) {
+      val hregioninfo:HRegionInfo = list.get(i)
+      startKey :+  hregioninfo.getStartKey
+      endKey :+ hregioninfo.getEndKey
+    }
+
+    return new org.apache.hadoop.hbase.util.Pair(startKey, endKey)
+  }
+
   /** See HTable.getRegionLocation(). */
   def getRegionLocation(row: String): HRegionLocation = {
     return getRegionLocation(Bytes.toBytes(row))
